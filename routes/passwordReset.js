@@ -5,7 +5,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
-const { FRONTEND_URL, RESET_PATH } = require('../config/constants');
+const { BACKEND_URL } = require('../config/constants');
 // const rateLimit = require('express-rate-limit'); // Uncomment for production
 
 const PasswordResetToken = require('../models/PasswordResetToken');
@@ -43,12 +43,12 @@ router.post('/request', async (req, res) => {
       service: 'gmail',
       auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
     });
-    const resetLink = `${FRONTEND_URL}${RESET_PATH}/${token}`;
+    const resetLink = `${BACKEND_URL}/reset-password/${token}`;
     await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: email,
       subject: 'Dostify Password Reset',
-      text: `Reset your password: ${resetLink}`
+      text: `Reset your password using this link: ${resetLink}`
     });
     res.json({ message: 'If the email exists, a reset link has been sent.' });
   } catch (err) {
