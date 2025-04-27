@@ -1,10 +1,10 @@
 const mongoose = require('mongoose');
 
 const TaskSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   title: { type: String, required: true },
   description: { type: String },
-  dueDate: { type: Date },
+  dueDate: { type: Date, index: true },
   completed: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now }
 });

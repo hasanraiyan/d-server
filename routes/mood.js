@@ -2,9 +2,15 @@ const express = require('express');
 const router = express.Router();
 const MoodLog = require('../models/MoodLog');
 const auth = require('../middleware/auth');
+const Joi = require('joi');
+const validate = require('../middleware/validate');
 
 // Log mood
-router.post('/', auth, async (req, res) => {
+const moodSchema = Joi.object({
+  mood: Joi.number().min(1).max(10).required(),
+  note: Joi.string().allow('').optional()
+});
+router.post('/', auth, validate(moodSchema), async (req, res) => {
   try {
     const { mood, note } = req.body;
     const log = new MoodLog({ user: req.userId, mood, note });

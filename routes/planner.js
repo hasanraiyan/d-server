@@ -3,6 +3,8 @@ const router = express.Router();
 const Task = require('../models/Task');
 const auth = require('../middleware/auth');
 const axios = require('axios');
+const Joi = require('joi');
+const validate = require('../middleware/validate');
 
 // Get all tasks for user (paginated)
 router.get('/', auth, async (req, res) => {
@@ -21,7 +23,12 @@ router.get('/', auth, async (req, res) => {
 });
 
 // Add a new task
-router.post('/', auth, async (req, res) => {
+const taskSchema = Joi.object({
+  title: Joi.string().required(),
+  description: Joi.string().allow('').optional(),
+  dueDate: Joi.date().optional()
+});
+router.post('/', auth, validate(taskSchema), async (req, res) => {
   try {
     const { title, description, dueDate } = req.body;
     const task = new Task({ user: req.userId, title, description, dueDate });
@@ -33,7 +40,8 @@ router.post('/', auth, async (req, res) => {
 });
 
 // Mark task as complete
-router.patch('/:id/complete', auth, async (req, res) => {
+const completeSchema = Joi.object({ id: Joi.string().length(24).hex().required() });
+router.patch('/:id/complete', auth, validate(completeSchema, 'params'), async (req, res) => {
   try {
     const task = await Task.findOneAndUpdate(
       { _id: req.params.id, user: req.userId },

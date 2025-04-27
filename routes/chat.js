@@ -3,6 +3,8 @@ const router = express.Router();
 const Chat = require('../models/Chat');
 const auth = require('../middleware/auth');
 const axios = require('axios');
+const Joi = require('joi');
+const validate = require('../middleware/validate');
 
 // Get chat history for a session (paginated)
 router.get('/:sessionId', auth, async (req, res) => {
@@ -21,7 +23,12 @@ router.get('/:sessionId', auth, async (req, res) => {
 });
 
 // Send message to AI and store chat (threaded, with context)
-router.post('/', auth, async (req, res) => {
+const chatSchema = Joi.object({
+  message: Joi.string().required(),
+  sessionId: Joi.string().required(),
+  type: Joi.string().valid('text', 'image', 'file').optional()
+});
+router.post('/', auth, validate(chatSchema), async (req, res) => {
   try {
     const { message, sessionId, type } = req.body;
     // Find or create chat session

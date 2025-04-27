@@ -2,9 +2,15 @@ const express = require('express');
 const router = express.Router();
 const Feedback = require('../models/Feedback');
 const auth = require('../middleware/auth');
+const Joi = require('joi');
+const validate = require('../middleware/validate');
 
 // Submit feedback
-router.post('/', auth, async (req, res) => {
+const feedbackSchema = Joi.object({
+  rating: Joi.number().min(1).max(5).required(),
+  comment: Joi.string().allow('').optional()
+});
+router.post('/', auth, validate(feedbackSchema), async (req, res) => {
   try {
     const { rating, comment } = req.body;
     const feedback = new Feedback({ user: req.userId, rating, comment });

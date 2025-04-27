@@ -8,8 +8,7 @@ const crypto = require('crypto');
 const { FRONTEND_URL, RESET_PATH } = require('../config/constants');
 // const rateLimit = require('express-rate-limit'); // Uncomment for production
 
-// TODO: Move to a dedicated model for reset tokens if you want single-use tokens
-const usedTokens = new Set(); // In-memory, replace with DB for production
+const PasswordResetToken = require('../models/PasswordResetToken');
 
 // Helper: Validate email format
 function isValidEmail(email) {
@@ -37,6 +36,9 @@ router.post('/request', async (req, res) => {
     // Generate a cryptographically secure token (JWT + random salt)
     const salt = crypto.randomBytes(16).toString('hex');
     const token = jwt.sign({ userId: user._id, salt }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    // Save token in DB (invalidate previous tokens for this user)
+    await PasswordResetToken.updateMany({ userId: user._id, used: false }, { used: true });
+    await PasswordResetToken.create({ userId: user._id, token, expiresAt: Date.now() + 60 * 60 * 1000 });
     const transporter = nodemailer.createTransport({
       service: 'gmail',
       auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
@@ -64,9 +66,10 @@ router.post('/reset/:token', async (req, res) => {
     return res.status(400).json({ message: 'Password must be at least 8 characters.' });
   }
   try {
-    // Prevent token replay (single-use)
-    if (usedTokens.has(token)) {
-      return res.status(400).json({ message: 'Token already used.' });
+    // Look up token in DB
+    const tokenDoc = await PasswordResetToken.findOne({ token });
+    if (!tokenDoc || tokenDoc.used || tokenDoc.expiresAt < Date.now()) {
+      return res.status(400).json({ message: 'Token already used or expired.' });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     // Optionally check if user still exists
@@ -76,7 +79,8 @@ router.post('/reset/:token', async (req, res) => {
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     await User.findByIdAndUpdate(decoded.userId, { password: hashedPassword });
-    usedTokens.add(token); // Mark token as used
+    tokenDoc.used = true;
+    await tokenDoc.save();
     res.json({ message: 'Password reset successful.' });
   } catch (err) {
     console.error('Password reset error:', err);

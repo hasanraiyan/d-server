@@ -1,8 +1,8 @@
 const mongoose = require('mongoose');
 
 const ChatSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  sessionId: { type: String }, // For threaded conversations
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  sessionId: { type: String, required: true, index: true }, // For threaded conversations
   messages: [
     {
       sender: String, // 'user' or 'ai'
