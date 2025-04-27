@@ -9,7 +9,7 @@ const axios = require('axios');
 
 // Ping every 5 minutes (300,000 ms)
 setInterval(() => {
-  axios.get(`${BACKEND_URL}/health`)
+  axios.get(`https://beu-data.onrender.com/health`)
     .then(res => {
       if (res.status !== 200) throw new Error(`Non-200 response: ${res.status}`);
     })
