@@ -43,7 +43,7 @@ router.post('/request', async (req, res) => {
       service: 'gmail',
       auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
     });
-    const resetLink = `${BACKEND_URL}/reset-password/${token}`;
+    const resetLink = `${BACKEND_URL}/api/password-reset/reset-password/${token}`;
     await transporter.sendMail({
       from: process.env.EMAIL_USER,
       to: email,
@@ -59,19 +59,67 @@ logger.error('Password reset request error:', err);
   }
 });
 
-// Show a friendly message when visiting the reset link directly
+// Show a password reset form when visiting the reset link directly
 router.get('/reset-password/:token', async (req, res) => {
+  const { token } = req.params;
   res.send(`
     <html>
       <head><title>Password Reset</title></head>
       <body>
         <h2>Password Reset</h2>
-        <p>This link is intended to be used in the Dostify mobile app.</p>
-        <p>If you are seeing this page, please open your Dostify app and use the password reset feature.</p>
-        <p>If you believe this is an error, contact support.</p>
+        <form method="POST" action="/api/password-reset/reset/${token}">
+          <label for="password">Enter new password:</label><br/>
+          <input type="password" id="password" name="password" minlength="8" required><br/>
+          <button type="submit">Reset Password</button>
+        </form>
       </body>
     </html>
   `);
+});
+
+// Optionally, handle POST from HTML form and show a user-friendly HTML response
+router.post('/reset/:token', async (req, res) => {
+  const { token } = req.params;
+  // Support both JSON (API) and form submissions
+  const password = req.body.password || (req.body && req.body['password']);
+  if (!password || !isValidPassword(password)) {
+    // If request is from browser, show HTML error
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/x-www-form-urlencoded')) {
+      return res.send('<html><body><p style="color:red">Password must be at least 8 characters.</p><a href="javascript:history.back()">Go Back</a></body></html>');
+    }
+    return res.status(400).json({ message: 'Password must be at least 8 characters.' });
+  }
+  try {
+    const tokenDoc = await PasswordResetToken.findOne({ token });
+    if (!tokenDoc || tokenDoc.used || tokenDoc.expiresAt < Date.now()) {
+      if (req.headers['content-type'] && req.headers['content-type'].includes('application/x-www-form-urlencoded')) {
+        return res.send('<html><body><p style="color:red">Token already used or expired.</p></body></html>');
+      }
+      return res.status(400).json({ message: 'Token already used or expired.' });
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      if (req.headers['content-type'] && req.headers['content-type'].includes('application/x-www-form-urlencoded')) {
+        return res.send('<html><body><p style="color:red">Invalid token.</p></body></html>');
+      }
+      return res.status(400).json({ message: 'Invalid token.' });
+    }
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await User.findByIdAndUpdate(decoded.userId, { password: hashedPassword });
+    tokenDoc.used = true;
+    await tokenDoc.save();
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/x-www-form-urlencoded')) {
+      return res.send('<html><body><p style="color:green">Password reset successful. You may now close this window.</p></body></html>');
+    }
+    res.json({ message: 'Password reset successful.' });
+  } catch (err) {
+    logger.error('Password reset error:', err);
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/x-www-form-urlencoded')) {
+      return res.send('<html><body><p style="color:red">Invalid or expired token.</p></body></html>');
+    }
+    res.status(400).json({ message: 'Invalid or expired token.' });
+  }
 });
 
 // Password reset (single-use, robust validation, error handling)
