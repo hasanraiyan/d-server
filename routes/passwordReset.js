@@ -53,7 +53,8 @@ router.post('/request', async (req, res) => {
     res.json({ message: 'If the email exists, a reset link has been sent.' });
   } catch (err) {
     // Log error for audit, but never leak details to client
-    console.error('Password reset request error:', err);
+    const logger = require('../logger');
+logger.error('Password reset request error:', err);
     res.status(500).json({ message: 'Server error. Please try again later.' });
   }
 });
@@ -83,7 +84,7 @@ router.post('/reset/:token', async (req, res) => {
     await tokenDoc.save();
     res.json({ message: 'Password reset successful.' });
   } catch (err) {
-    console.error('Password reset error:', err);
+    logger.error('Password reset error:', err);
     res.status(400).json({ message: 'Invalid or expired token.' });
   }
 });

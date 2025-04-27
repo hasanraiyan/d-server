@@ -40,7 +40,7 @@ router.post('/', auth, validate(chatSchema), async (req, res) => {
     // Prepare context for AI (last 10 messages)
     const context = chat.messages.slice(-10).map(m => `${m.sender}: ${m.message}`).join('\n');
     // Call AI API with context
-    const aiResponse = await axios.post('https://text.pollinations.ai/openai', {
+    const aiResponse = await axios.post(process.env.AI_API_URL, {
       prompt: `${context}\nuser: ${message}`,
       apiKey: process.env.AI_API_KEY
     });

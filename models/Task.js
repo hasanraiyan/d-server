@@ -5,8 +5,7 @@ const TaskSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String },
   dueDate: { type: Date, index: true },
-  completed: { type: Boolean, default: false },
-  createdAt: { type: Date, default: Date.now }
-});
+  completed: { type: Boolean, default: false }
+}, { timestamps: true });
 
 module.exports = mongoose.model('Task', TaskSchema);

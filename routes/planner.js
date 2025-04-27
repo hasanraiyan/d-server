@@ -92,7 +92,7 @@ router.post('/ai', auth, validate(aiPlannerSchema), async (req, res) => {
     // Compose prompt for AI
     const prompt = `Create a detailed study plan for: ${goals}. Timeframe: ${timeframe}. Format as a checklist with tasks and deadlines.`;
     // Call AI API (stub - replace with real integration)
-    const aiResponse = await axios.post('https://text.pollinations.ai/openai/', {
+    const aiResponse = await axios.post(process.env.AI_API_URL, {
       prompt,
       apiKey: process.env.AI_API_KEY
     });
