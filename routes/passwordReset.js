@@ -59,6 +59,21 @@ logger.error('Password reset request error:', err);
   }
 });
 
+// Show a friendly message when visiting the reset link directly
+router.get('/reset-password/:token', async (req, res) => {
+  res.send(`
+    <html>
+      <head><title>Password Reset</title></head>
+      <body>
+        <h2>Password Reset</h2>
+        <p>This link is intended to be used in the Dostify mobile app.</p>
+        <p>If you are seeing this page, please open your Dostify app and use the password reset feature.</p>
+        <p>If you believe this is an error, contact support.</p>
+      </body>
+    </html>
+  `);
+});
+
 // Password reset (single-use, robust validation, error handling)
 router.post('/reset/:token', async (req, res) => {
   const { token } = req.params;

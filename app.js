@@ -4,6 +4,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 
 const app = express();
+app.set('trust proxy', 1); // Trust first proxy for correct IP handling behind proxies
 const logger = require('./logger');
 const expressWinston = require('express-winston');
 const { v4: uuidv4 } = require('uuid');
