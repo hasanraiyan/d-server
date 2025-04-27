@@ -2,11 +2,17 @@ const express = require('express');
 const router = express.Router();
 const nodemailer = require('nodemailer');
 const auth = require('../middleware/auth');
+const Joi = require('joi');
+const validate = require('../middleware/validate');
 
 // Stub: Send notification (email)
-router.post('/email', auth, async (req, res) => {
+const notificationSchema = Joi.object({
+  to: Joi.string().email().required(),
+  subject: Joi.string().required(),
+  text: Joi.string().required()
+});
+router.post('/email', auth, validate(notificationSchema), async (req, res) => {
   const { to, subject, text } = req.body;
-  if (!to || !subject || !text) return res.status(400).json({ message: 'Missing fields' });
   try {
     const transporter = nodemailer.createTransport({
       service: 'gmail',

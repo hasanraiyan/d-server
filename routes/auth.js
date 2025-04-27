@@ -3,6 +3,8 @@ const router = express.Router();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Joi = require('joi');
+const validate = require('../middleware/validate');
 
 /**
  * @swagger
@@ -33,7 +35,12 @@ const User = require('../models/User');
  *         description: User already exists
  */
 // Register
-router.post('/register', async (req, res) => {
+const registerSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().min(8).required(),
+  name: Joi.string().optional()
+});
+router.post('/register', validate(registerSchema), async (req, res) => {
   try {
     const { email, password, name } = req.body;
     const existingUser = await User.findOne({ email });
@@ -74,7 +81,11 @@ router.post('/register', async (req, res) => {
  *         description: Invalid credentials
  */
 // Login
-router.post('/login', async (req, res) => {
+const loginSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().required()
+});
+router.post('/login', validate(loginSchema), async (req, res) => {
   try {
     const { email, password } = req.body;
     const user = await User.findOne({ email });

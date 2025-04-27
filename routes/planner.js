@@ -82,7 +82,11 @@ router.patch('/:id/complete', auth, validate(completeSchema, 'params'), async (r
  *       500:
  *         description: AI or server error
  */
-router.post('/ai', auth, async (req, res) => {
+const aiPlannerSchema = Joi.object({
+  goals: Joi.string().required(),
+  timeframe: Joi.string().required()
+});
+router.post('/ai', auth, validate(aiPlannerSchema), async (req, res) => {
   try {
     const { goals, timeframe } = req.body;
     // Compose prompt for AI

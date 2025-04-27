@@ -5,6 +5,7 @@ const auth = require('../middleware/auth');
 const axios = require('axios');
 const Joi = require('joi');
 const validate = require('../middleware/validate');
+const Task = require('../models/Task');
 
 // Get chat history for a session (paginated)
 router.get('/:sessionId', auth, async (req, res) => {
@@ -55,12 +56,16 @@ router.post('/', auth, validate(chatSchema), async (req, res) => {
 });
 
 // Submit feedback for an AI message in a session
-router.post('/:sessionId/feedback', auth, async (req, res) => {
+const feedbackSchema = Joi.object({
+  messageIndex: Joi.number().integer().min(0).required(),
+  feedback: Joi.number().integer().min(1).max(5).required()
+});
+router.post('/:sessionId/feedback', auth, validate(feedbackSchema), async (req, res) => {
   try {
     const { messageIndex, feedback } = req.body;
     const chat = await Chat.findOne({ user: req.userId, sessionId: req.params.sessionId });
     if (!chat) return res.status(404).json({ message: 'Chat session not found' });
-    if (typeof messageIndex !== 'number' || messageIndex < 0 || messageIndex >= chat.messages.length) {
+    if (messageIndex < 0 || messageIndex >= chat.messages.length) {
       return res.status(400).json({ message: 'Invalid message index' });
     }
     chat.messages[messageIndex].feedback = feedback;
@@ -72,15 +77,19 @@ router.post('/:sessionId/feedback', auth, async (req, res) => {
 });
 
 // Save AI-suggested task directly to planner
-router.post('/:sessionId/save-task', auth, async (req, res) => {
+const saveTaskSchema = Joi.object({
+  title: Joi.string().required(),
+  description: Joi.string().allow('').optional(),
+  dueDate: Joi.date().optional()
+});
+router.post('/:sessionId/save-task', auth, validate(saveTaskSchema), async (req, res) => {
   try {
     const { title, description, dueDate } = req.body;
-    const Task = require('../models/Task');
     const task = new Task({ user: req.userId, title, description, dueDate });
     await task.save();
     res.status(201).json(task);
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
