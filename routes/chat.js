@@ -255,7 +255,29 @@ router.post('/', auth, validate(chatSchema), async (req, res) => {
     await chat.save();
     res.json({ chat, ai: followUpAI || aiMsg, aiImageUrl: followUpAIImageUrl || aiImageUrl, toolResult, timestamp: new Date().toISOString() });
   } catch (err) {
-    res.status(500).json({ message: 'AI or server error', error: err.message });
+    // Enhanced error logging
+    console.error('POST /api/chat error:', {
+      message: err.message,
+      stack: err.stack,
+      requestBody: req.body,
+      aiApiUrl: process.env.AI_API_URL,
+      aiApiKeySet: !!process.env.AI_API_KEY,
+    });
+    // If axios error, log response if available
+    if (err.response) {
+      console.error('AI API error response:', {
+        status: err.response.status,
+        data: err.response.data,
+      });
+    }
+    // Return detailed error in development, generic in production
+    const isDev = process.env.NODE_ENV !== 'production';
+    res.status(500).json({
+      message: 'AI or server error',
+      error: isDev ? err.message : undefined,
+      stack: isDev ? err.stack : undefined,
+      details: isDev && err.response ? err.response.data : undefined
+    });
   }
 });
 
