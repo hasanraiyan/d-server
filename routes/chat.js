@@ -1,15 +1,15 @@
-// FILE: routes/chat.js
+// FILE: hasanraiyan-d-server/routes/chat.js (Updated)
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose'); // Import mongoose for ObjectId usage
-const Chat = require('../models/Chat');
-const auth = require('../middleware/auth');
+const mongoose = require('mongoose');
+const Chat = require('../models/Chat'); // Ensure this path is correct
+const auth = require('../middleware/auth'); // Ensure this path is correct
 const axios = require('axios');
 const Joi = require('joi');
-const validate = require('../middleware/validate');
-const Task = require('../models/Task');
-const MoodLog = require('../models/MoodLog');
-const logger = require('../logger'); // Import your logger
+const validate = require('../middleware/validate'); // Ensure this path is correct
+const Task = require('../models/Task'); // Ensure this path is correct
+const MoodLog = require('../models/MoodLog'); // Ensure this path is correct
+const logger = require('../logger'); // Ensure this path is correct
 
 // --- Tool Definitions (OpenAI Standard - Including all original tools) ---
 const aiTools = [
@@ -145,8 +145,8 @@ const aiTools = [
 const chatSchema = Joi.object({
   message: Joi.string().trim().min(1).required(),
   sessionId: Joi.string().required(),
-  type: Joi.string().valid('text', 'image').default('text'),
-  imageUrl: Joi.string().uri().when('type', { is: 'image', then: Joi.required(), otherwise: Joi.forbidden() })
+  type: Joi.string().valid('text', 'image').default('text'), // Keep validation for type
+  imageUrl: Joi.string().uri().when('type', { is: 'image', then: Joi.optional(), otherwise: Joi.optional() }) // Allow optional imageUrl
 });
 
 const feedbackSchema = Joi.object({
@@ -166,13 +166,13 @@ const renameSchema = Joi.object({
 // --- End Validation Schemas ---
 
 
-// --- Main Chat POST endpoint with Pollinations Integration & Tool Calling ---
+// --- Main Chat POST endpoint with Pollinations/OpenAI Integration & Tool Calling ---
 router.post('/', auth, validate(chatSchema), async (req, res) => {
-  const { message, sessionId, type, imageUrl } = req.body;
+  const { message, sessionId, type, imageUrl } = req.body; // type/imageUrl might be undefined if not sent
   const userId = req.userId;
-  const requestId = req.id;
+  const requestId = req.id; // Assuming request ID middleware is used
 
-  logger.info(`[${requestId}] [Chat ${sessionId}] POST /api/chat started`, { userId, type });
+  logger.info(`[${requestId}] [Chat ${sessionId}] POST /api/chat started`, { userId, type: type || 'text' }); // Log received type or default
 
   try {
     let chat = await Chat.findOne({ user: userId, sessionId });
@@ -180,41 +180,53 @@ router.post('/', auth, validate(chatSchema), async (req, res) => {
     if (!chat) {
       logger.info(`[${requestId}] [Chat ${sessionId}] Creating new chat session`, { userId });
       chat = new Chat({ user: userId, sessionId, messages: [] });
+      // Optionally add an initial system message if desired
+      // chat.messages.push({ sender: 'system', message: 'Chat session started.', type: 'system', timestamp: new Date() });
     }
 
-    // --- 1. Prepare context for AI ---
-    const CONTEXT_LIMIT = 10;
+    // --- 1. Prepare context for AI (OpenAI Format) ---
+    const CONTEXT_LIMIT = 10; // How many *past* messages to send
     const history = chat.messages.slice(-CONTEXT_LIMIT).map(m => {
-      let messageObject = { role: '', content: null };
+      // Map database message format to OpenAI message format
       if (m.sender === 'user') {
-        messageObject.role = 'user';
-        let contentArray = [{ type: 'text', text: m.message || "" }];
+        let content = [{ type: 'text', text: m.message || "" }]; // Ensure text content is always present
         if (m.type === 'image' && m.imageUrl) {
-          contentArray.push({ type: 'image_url', image_url: { url: m.imageUrl } });
+          content.push({ type: 'image_url', image_url: { url: m.imageUrl } });
         }
-        messageObject.content = contentArray;
+        return { role: 'user', content: content };
       } else if (m.sender === 'ai') {
-        messageObject.role = 'assistant';
         if (m.tool_calls && m.tool_calls.length > 0) {
-          messageObject.content = m.message; // May be null
-          messageObject.tool_calls = m.tool_calls;
+          // If the AI message contained tool calls
+          return {
+            role: 'assistant',
+            content: m.message, // Content might be null or text accompanying the tool call
+            tool_calls: m.tool_calls.map(tc => ({ // Map to OpenAI format
+              id: tc.id,
+              type: tc.type || 'function', // Default type if missing
+              function: {
+                name: tc.function.name,
+                arguments: tc.function.arguments // Arguments should be a JSON string
+              }
+            })).filter(tc => tc.id && tc.function?.name && tc.function?.arguments !== undefined) // Basic validation
+          };
         } else {
-          messageObject.content = m.message;
+          // Regular AI text message
+          return { role: 'assistant', content: m.message };
         }
       } else if (m.sender === 'tool') {
-        return { role: 'tool', tool_call_id: m.tool_call_id, name: m.tool_name, content: m.message };
-      } else {
-        logger.warn(`[${requestId}] [Chat ${sessionId}] Skipping message with unknown sender type: ${m.sender}`);
-        return null;
+        // Result of a tool call
+        return {
+          role: 'tool',
+          tool_call_id: m.tool_call_id,
+          name: m.tool_name,
+          content: m.toolResultData ? JSON.stringify(m.toolResultData) : (m.message || '{"success":false, "error":"Missing tool result data"}') // Send structured data back, handle missing data
+        };
       }
-      if ((messageObject.role === 'user' || messageObject.role === 'assistant') && messageObject.content === null) {
-        if (!(messageObject.role === 'assistant' && messageObject.tool_calls && messageObject.tool_calls.length > 0)) {
-          messageObject.content = "";
-        }
-      }
-      return messageObject;
-    }).filter(m => m !== null);
+      logger.warn(`[${requestId}] [Chat ${sessionId}] Skipping message with unknown sender type in history mapping: ${m.sender}`);
+      return null;
+    }).filter(m => m !== null); // Filter out any skipped messages
 
+    // Add current user message to the history being sent
     let currentUserMessageContent = [{ type: 'text', text: message }];
     if (type === 'image' && imageUrl) {
       currentUserMessageContent.push({ type: 'image_url', image_url: { url: imageUrl } });
@@ -223,298 +235,436 @@ router.post('/', auth, validate(chatSchema), async (req, res) => {
 
     // --- 2. Save User Message to DB ---
     const userMessageToSave = {
-      sender: 'user', message: message, type: type,
-      imageUrl: type === 'image' ? imageUrl : undefined, timestamp: new Date()
+      sender: 'user',
+      message: message, // The text part
+      type: type || 'text', // Default to text if not provided
+      imageUrl: (type === 'image' && imageUrl) ? imageUrl : undefined,
+      timestamp: new Date()
+      // Ensure this object structure matches your MessageSchema in models/Chat.js
     };
     chat.messages.push(userMessageToSave);
     chat.lastActivity = new Date();
-    await chat.save();
-    logger.info(`[${requestId}] [Chat ${sessionId}] User message saved to DB`);
 
-    // --- 3. First API Call to Pollinations ---
+    // Optional Savepoint: Save user message immediately before calling AI
+    // try {
+    //   await chat.save();
+    //   logger.info(`[${requestId}] [Chat ${sessionId}] User message saved before AI call.`);
+    // } catch (preSaveErr) {
+    //    logger.error(`[${requestId}] [Chat ${sessionId}] Error saving user message before AI call`, { error: preSaveErr.message, stack: preSaveErr.stack });
+    //    // Decide if you should stop here or try calling AI anyway
+    //    return res.status(500).json({ message: 'Failed to save your message before contacting AI.' });
+    // }
+
+    // --- 3. First API Call to Pollinations/OpenAI ---
+    const aiApiUrl = process.env.AI_API_URL || 'https://text.pollinations.ai/openai'; // Fallback URL
+    const aiModel = process.env.AI_MODEL || 'openai'; // Or a specific model like 'gpt-4o'
     const apiPayload = {
-      model: process.env.AI_MODEL || 'openai',
-      messages: history,
+      model: aiModel,
+      messages: history, // The mapped history + current message
       tools: aiTools.length > 0 ? aiTools : undefined,
       tool_choice: aiTools.length > 0 ? "auto" : undefined,
-      referrer: process.env.POLLINATIONS_REFERRER || "DostifyApp-Backend"
+      // Optional parameters:
+      // temperature: 0.7,
+      // max_tokens: 1000,
+      referrer: process.env.POLLINATIONS_REFERRER || "DostifyApp-Backend" // If using Pollinations specifically
     };
 
-    logger.info(`[${requestId}] [Chat ${sessionId}] Calling Pollinations API (Initial)`, { url: process.env.AI_API_URL, model: apiPayload.model });
+    logger.info(`[${requestId}] [Chat ${sessionId}] Calling AI API (Initial)`, { url: aiApiUrl, model: apiPayload.model });
     let aiApiResponse;
     try {
-      aiApiResponse = await axios.post(process.env.AI_API_URL, apiPayload, { timeout: 120000 });
-      logger.info(`[${requestId}] [Chat ${sessionId}] Pollinations API (Initial) response status: ${aiApiResponse.status}`);
+      // Use a longer timeout for potentially complex AI responses or tool calls
+      aiApiResponse = await axios.post(aiApiUrl, apiPayload, {
+          timeout: 120000, // 120 seconds timeout
+          headers: {
+              // Add Authorization header if Pollinations requires an API key directly
+              // 'Authorization': `Bearer ${process.env.AI_API_KEY}` // Example if needed
+          }
+      });
+      logger.info(`[${requestId}] [Chat ${sessionId}] AI API (Initial) response status: ${aiApiResponse.status}`);
     } catch (apiError) {
-      logger.error(`[${requestId}] [Chat ${sessionId}] Pollinations API Error (Initial Call)`, { /* ... error details ... */ });
-      return res.status(502).json({ message: 'Error: Could not reach the AI service. Please try again later.' });
+      const errorDetails = apiError.response ? { status: apiError.response.status, data: apiError.response.data } : { message: apiError.message };
+      logger.error(`[${requestId}] [Chat ${sessionId}] AI API Error (Initial Call)`, { error: errorDetails });
+      // Save the user message even if AI fails (if not saved earlier)
+      try { await chat.save(); } catch (saveErr) { logger.error(`[${requestId}] [Chat ${sessionId}] Failed to save user message after AI error`, { saveError: saveErr.message }); }
+      // Provide a user-friendly error message
+      return res.status(502).json({ message: 'Error: The AI service failed to respond. Please try again later.' });
     }
 
     // --- 4. Process API Response ---
-    if (!aiApiResponse.data?.choices?.[0]) {
-      logger.error(`[${requestId}] [Chat ${sessionId}] Invalid response structure from Pollinations`, { responseData: aiApiResponse.data });
-      return res.status(502).json({ message: 'Error: Received an invalid response from the AI service.' });
+    if (!aiApiResponse.data?.choices?.[0]?.message) { // Check structure carefully based on OpenAI spec
+      logger.error(`[${requestId}] [Chat ${sessionId}] Invalid response structure from AI`, { responseData: aiApiResponse.data });
+      try { await chat.save(); } catch (saveErr) { logger.error(`[${requestId}] [Chat ${sessionId}] Failed to save user message after invalid AI response`, { saveError: saveErr.message }); }
+      return res.status(502).json({ message: 'Error: Received an unexpected response format from the AI service.' });
     }
 
     const responseChoice = aiApiResponse.data.choices[0];
-    const responseMessage = responseChoice.message;
-    let finalAiMessageContent = responseMessage.content;
-    let toolResultsForClient = [];
+    const responseMessage = responseChoice.message; // This is the {role: 'assistant', content: '...', tool_calls: [...]} object
+    let finalAiMessageContent = responseMessage.content; // This might be null if only tool_calls are present
+    let toolResultsForClient = []; // To inform the client what actions were taken
 
     // --- 5. Handle Tool Calls ---
+    // Check if the response contains tool calls and the reason indicates tools should be called
     if (responseMessage.tool_calls && responseChoice.finish_reason === 'tool_calls') {
-      logger.info(`[${requestId}] [Chat ${sessionId}] AI requested tool calls`, { /* ... call details ... */ });
+      logger.info(`[${requestId}] [Chat ${sessionId}] AI requested tool calls`, { count: responseMessage.tool_calls.length, calls: responseMessage.tool_calls.map(t => t.function?.name) });
 
-      const assistantToolCallMessage = {
-        sender: 'ai', message: responseMessage.content, type: 'tool_request',
-        tool_calls: responseMessage.tool_calls, timestamp: new Date()
+      // --- 5a. Save AI's Tool Call Request Message ---
+      const assistantToolCallRequestMessage = {
+        sender: 'ai',
+        message: responseMessage.content, // May be null or contain text like "Okay, I can do that."
+        type: 'tool_request', // Indicate this is the AI's request
+        tool_calls: responseMessage.tool_calls.map(tc => ({ // Store tool call details structurally based on MessageSchema
+          id: tc.id,
+          type: tc.type, // e.g., 'function'
+          function: {
+            name: tc.function.name,
+            arguments: tc.function.arguments // Store the raw arguments JSON string
+          }
+        })),
+        timestamp: new Date()
       };
-      chat.messages.push(assistantToolCallMessage);
+      chat.messages.push(assistantToolCallRequestMessage);
 
-      const followUpHistory = [...history, responseMessage];
-      let executedToolResults = [];
+      // Prepare history for the follow-up call (includes user msg, AI request)
+      const followUpHistory = [...history, responseMessage]; // Add the assistant's message object itself
+      let executedToolResults = []; // Store results to send back to AI
 
-      // --- 5a. Execute Tool Calls ---
+      // --- 5b. Execute Tool Calls Sequentially ---
       for (const toolCall of responseMessage.tool_calls) {
+        if (toolCall.type !== 'function') {
+            logger.warn(`[${requestId}] [Chat ${sessionId}] Skipping non-function tool call type: ${toolCall.type}`);
+            continue;
+        }
+
         const functionName = toolCall.function.name;
         const toolCallId = toolCall.id;
         let functionArgs;
         try {
+          // **Crucially parse arguments string here**
           functionArgs = JSON.parse(toolCall.function.arguments);
         } catch (parseError) {
-          logger.error(`[${requestId}] [Chat ${sessionId}] Failed to parse tool arguments for ${functionName}`, { /* ... error details ... */ });
-          const errorResult = { success: false, error: "Invalid arguments provided by AI." };
+          logger.error(`[${requestId}] [Chat ${sessionId}] Failed to parse tool arguments for ${functionName}`, { argsString: toolCall.function.arguments, error: parseError.message });
+          const errorResult = { success: false, error: `Invalid arguments format received from AI for ${functionName}.` };
           executedToolResults.push({ tool_call_id: toolCallId, name: functionName, result: errorResult });
-          chat.messages.push({ sender: 'tool', message: JSON.stringify(errorResult), type: 'tool_result', tool_call_id: toolCallId, tool_name: functionName, timestamp: new Date() });
-          continue;
+          // Save the error result message to DB
+          chat.messages.push({
+            sender: 'tool',
+            message: `Error executing tool '${functionName}': Invalid arguments provided by AI.`, // User-friendly summary
+            type: 'tool_result',
+            tool_call_id: toolCallId,
+            tool_name: functionName,
+            toolResultData: errorResult, // Store the detailed error
+            timestamp: new Date()
+          });
+          toolResultsForClient.push(errorResult); // Inform client
+          continue; // Skip to next tool call if arguments are invalid
         }
 
         let currentToolResult = null;
         logger.info(`[${requestId}] [Chat ${sessionId}] Executing tool: ${functionName}`, { toolCallId, args: functionArgs });
+
         try {
-          // --- Tool Execution Logic ---
-          if (functionName === 'log_mood') {
-            // ... (implementation as before)
-            const moodValue = parseInt(functionArgs.mood);
-            if (isNaN(moodValue) || moodValue < 1 || moodValue > 10) throw new Error("Mood value must be an integer between 1 and 10.");
-            const moodDoc = new MoodLog({ user: userId, mood: moodValue, note: functionArgs.note });
-            await moodDoc.save();
-            currentToolResult = { success: true, message: `Mood (${moodValue}) logged successfully.` };
-          } else if (functionName === 'create_task') {
-            // ... (implementation as before)
-            let parsedDueDate;
-            if (functionArgs.dueDate) { /* ... date parsing ... */
-              try {
-                if (typeof functionArgs.dueDate === 'string' && !/^\d{4}-\d{2}-\d{2}/.test(functionArgs.dueDate)) logger.warn(`[${requestId}] [Chat ${sessionId}] Potentially non-ISO date for create_task: "${functionArgs.dueDate}". Attempting parse.`);
-                parsedDueDate = new Date(functionArgs.dueDate);
-                if (isNaN(parsedDueDate.getTime())) throw new Error('Invalid date format provided.');
-              } catch (dateError) {
-                logger.warn(`[${requestId}] [Chat ${sessionId}] Error parsing date for create_task: "${functionArgs.dueDate}". Task created without due date.`, { error: dateError });
-                parsedDueDate = undefined;
-              }
-            }
-            const taskDoc = new Task({ user: userId, title: functionArgs.title, description: functionArgs.description, dueDate: parsedDueDate });
-            await taskDoc.save();
-            let message = `Task "${functionArgs.title}" created successfully.`;
-            if (parsedDueDate) message += ` Due: ${parsedDueDate.toLocaleDateString()}`;
-            currentToolResult = { success: true, message: message, taskId: taskDoc._id.toString() };
-          } else if (functionName === 'get_tasks') {
-            // ... (implementation as before)
-            const filter = { user: userId };
-            if (typeof functionArgs.completed === 'boolean') filter.completed = functionArgs.completed;
-            const tasks = await Task.find(filter).select('title description dueDate completed _id').sort({ dueDate: 1, createdAt: -1 }).limit(25);
-            if (tasks.length === 0) currentToolResult = { success: true, message: "No tasks found matching the criteria." };
-            else currentToolResult = { success: true, tasks: tasks.map(t => ({ id: t._id.toString(), title: t.title, description: t.description || 'No description', dueDate: t.dueDate?.toISOString().split('T')[0] || 'No due date', completed: t.completed })) };
-          } else if (functionName === 'get_mood_history') {
-            // ... (implementation as before)
-            const days = parseInt(functionArgs.days) || 30;
-            if (isNaN(days) || days <= 0) throw new Error("Number of days must be a positive integer.");
-            const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-            const moods = await MoodLog.find({ user: userId, createdAt: { $gte: since } }).select('mood note createdAt').sort({ createdAt: -1 }).limit(50);
-            if (moods.length === 0) currentToolResult = { success: true, message: `No mood logs found in the last ${days} days.` };
-            else currentToolResult = { success: true, moods: moods.map(m => ({ mood: m.mood, note: m.note || 'No note', date: m.createdAt.toISOString().split('T')[0] })) };
+          // --- Tool Execution Logic (Switch or If/Else based on functionName) ---
+          switch (functionName) {
+              case 'log_mood':
+                  const moodValue = parseInt(functionArgs.mood);
+                  if (isNaN(moodValue) || moodValue < 1 || moodValue > 10) throw new Error("Mood value must be an integer between 1 and 10.");
+                  const moodDoc = new MoodLog({ user: userId, mood: moodValue, note: functionArgs.note });
+                  await moodDoc.save();
+                  currentToolResult = { success: true, message: `Mood (${moodValue}) logged successfully.` };
+                  break;
+
+              case 'create_task':
+                  let parsedDueDate;
+                  if (functionArgs.dueDate) {
+                     try {
+                       // Basic date parsing, consider library for robust parsing
+                       if (typeof functionArgs.dueDate === 'string' && !/^\d{4}-\d{2}-\d{2}/.test(functionArgs.dueDate)) {
+                          logger.warn(`[${requestId}] [Chat ${sessionId}] Potentially non-ISO date for create_task: "${functionArgs.dueDate}". Attempting generic parse.`);
+                       }
+                       parsedDueDate = new Date(functionArgs.dueDate);
+                       if (isNaN(parsedDueDate.getTime())) throw new Error('Invalid date format provided by AI.');
+                     } catch (dateError) {
+                       logger.warn(`[${requestId}] [Chat ${sessionId}] Error parsing date for create_task: "${functionArgs.dueDate}". Task created without due date.`, { error: dateError.message });
+                       parsedDueDate = undefined; // Fallback: create task without date
+                     }
+                   }
+                   const taskDoc = new Task({ user: userId, title: functionArgs.title, description: functionArgs.description, dueDate: parsedDueDate });
+                   await taskDoc.save();
+                   let taskMessage = `Task "${functionArgs.title}" created successfully.`;
+                   if (parsedDueDate) taskMessage += ` Due: ${parsedDueDate.toLocaleDateString()}`;
+                   currentToolResult = { success: true, message: taskMessage, taskId: taskDoc._id.toString() };
+                   break;
+
+              case 'get_tasks':
+                  const filter = { user: userId };
+                  if (typeof functionArgs.completed === 'boolean') filter.completed = functionArgs.completed;
+                  const tasks = await Task.find(filter).select('title description dueDate completed _id').sort({ dueDate: 1, createdAt: -1 }).limit(25);
+                  if (tasks.length === 0) {
+                     currentToolResult = { success: true, message: "No tasks found matching the criteria." };
+                  } else {
+                     currentToolResult = { success: true, tasks: tasks.map(t => ({ id: t._id.toString(), title: t.title, description: t.description || 'N/A', dueDate: t.dueDate?.toISOString().split('T')[0] || 'N/A', completed: t.completed })) };
+                  }
+                  break;
+
+              case 'get_mood_history':
+                   const days = parseInt(functionArgs.days) || 30;
+                   if (isNaN(days) || days <= 0) throw new Error("Number of days must be a positive integer.");
+                   const sinceDate = new Date();
+                   sinceDate.setDate(sinceDate.getDate() - days);
+                   const moods = await MoodLog.find({ user: userId, createdAt: { $gte: sinceDate } }).select('mood note createdAt').sort({ createdAt: -1 }).limit(50);
+                   if (moods.length === 0) {
+                     currentToolResult = { success: true, message: `No mood logs found in the last ${days} days.` };
+                   } else {
+                      currentToolResult = { success: true, moods: moods.map(m => ({ mood: m.mood, note: m.note || 'N/A', date: m.createdAt.toISOString().split('T')[0] })) };
+                   }
+                   break;
+
+              case 'update_task':
+                   const { identifier, newTitle, newDescription, newDueDate, markCompleted } = functionArgs;
+                   if (!identifier) throw new Error("Task identifier (title or ID) is required for update.");
+                   const query = mongoose.Types.ObjectId.isValid(identifier)
+                     ? { _id: new mongoose.Types.ObjectId(identifier), user: userId }
+                     : { title: identifier, user: userId };
+                   const updateFields = { $set: {} };
+                   let changesMade = false;
+                   if (newTitle) { updateFields.$set.title = newTitle; changesMade = true; }
+                   if (newDescription !== undefined) { updateFields.$set.description = newDescription; changesMade = true; }
+                   if (markCompleted !== undefined) { updateFields.$set.completed = markCompleted; changesMade = true; }
+                   if (newDueDate) {
+                     try {
+                       const parsedDate = new Date(newDueDate);
+                       if (isNaN(parsedDate.getTime())) throw new Error('Invalid date format for newDueDate.');
+                       updateFields.$set.dueDate = parsedDate;
+                       changesMade = true;
+                     } catch (dateError) {
+                       logger.warn(`[${requestId}] [Chat ${sessionId}] Invalid date for update_task: "${newDueDate}". Date not updated.`, { error: dateError.message });
+                     }
+                   }
+                   if (!changesMade) {
+                     currentToolResult = { success: false, message: "No changes provided for the task update." };
+                   } else {
+                     const updatedTask = await Task.findOneAndUpdate(query, updateFields, { new: true });
+                     if (!updatedTask) {
+                       currentToolResult = { success: false, error: `Task with identifier "${identifier}" not found or access denied.` };
+                     } else {
+                       currentToolResult = { success: true, message: `Task "${updatedTask.title}" updated successfully.` };
+                     }
+                   }
+                   break;
+
+              case 'delete_task':
+                  const { identifier: deleteIdentifier } = functionArgs; // Rename to avoid conflict
+                  if (!deleteIdentifier) throw new Error("Task identifier (title or ID) is required for deletion.");
+                  const deleteQuery = mongoose.Types.ObjectId.isValid(deleteIdentifier)
+                    ? { _id: new mongoose.Types.ObjectId(deleteIdentifier), user: userId }
+                    : { title: deleteIdentifier, user: userId };
+                  const deletedTask = await Task.findOneAndDelete(deleteQuery);
+                  if (!deletedTask) {
+                    currentToolResult = { success: false, error: `Task with identifier "${deleteIdentifier}" not found or access denied.` };
+                  } else {
+                    currentToolResult = { success: true, message: `Task "${deletedTask.title}" deleted successfully.` };
+                  }
+                  break;
+
+              case 'get_session_summary':
+                  const summary = {
+                    sessionId: chat.sessionId,
+                    title: chat.title || `Chat started on ${new Date(chat.createdAt).toLocaleDateString()}`,
+                    createdAt: chat.createdAt.toISOString(),
+                    lastActivity: chat.lastActivity.toISOString(),
+                    messageCount: chat.messages.length,
+                    firstUserMessage: chat.messages.find(m => m.sender === 'user')?.message?.substring(0, 100) || null
+                  };
+                  currentToolResult = { success: true, summary: summary };
+                  break;
+
+              case 'give_feedback':
+                  const { messageIndex, rating } = functionArgs;
+                  if (messageIndex < 0 || messageIndex >= chat.messages.length) {
+                     throw new Error(`Invalid message index ${messageIndex}. Session has ${chat.messages.length} messages.`);
+                  }
+                  const targetMessage = chat.messages[messageIndex];
+                  if (!targetMessage || targetMessage.sender !== 'ai') {
+                     throw new Error("Feedback can only be given for AI messages at the specified index.");
+                  }
+                  if (isNaN(parseInt(rating)) || rating < 1 || rating > 5) {
+                     throw new Error("Rating must be an integer between 1 and 5.");
+                  }
+                  targetMessage.feedback = rating;
+                  chat.markModified('messages'); // IMPORTANT: Tell Mongoose the array element changed
+                  currentToolResult = { success: true, message: `Feedback (${rating}) recorded for message at index ${messageIndex}.` };
+                  break;
+
+              default:
+                  logger.warn(`[${requestId}] [Chat ${sessionId}] Unknown tool called: ${functionName}`);
+                  currentToolResult = { success: false, error: `Tool '${functionName}' is not implemented or recognized.` };
           }
-          // --- NEW/RESTORED Tool Implementations ---
-          else if (functionName === 'update_task') {
-            const { identifier, newTitle, newDescription, newDueDate, markCompleted } = functionArgs;
-            const query = mongoose.Types.ObjectId.isValid(identifier)
-              ? { _id: identifier, user: userId }
-              : { title: identifier, user: userId }; // Find by ID or title
-
-            const updateFields = { $set: {} };
-            let changesMade = false;
-            if (newTitle) { updateFields.$set.title = newTitle; changesMade = true; }
-            if (newDescription !== undefined) { updateFields.$set.description = newDescription; changesMade = true; } // Allow empty description
-            if (markCompleted !== undefined) { updateFields.$set.completed = markCompleted; changesMade = true; }
-            if (newDueDate) {
-              try {
-                const parsedDate = new Date(newDueDate);
-                if (isNaN(parsedDate.getTime())) throw new Error('Invalid date format for newDueDate.');
-                updateFields.$set.dueDate = parsedDate;
-                changesMade = true;
-              } catch (dateError) {
-                logger.warn(`[${requestId}] [Chat ${sessionId}] Invalid date for update_task: "${newDueDate}". Date not updated.`, { error: dateError });
-                // Optionally inform AI/user? For now, just skip date update.
-              }
-            }
-
-            if (!changesMade) {
-              currentToolResult = { success: false, error: "No update fields provided (newTitle, newDescription, newDueDate, markCompleted)." };
-            } else {
-              const updatedTask = await Task.findOneAndUpdate(query, updateFields, { new: true });
-              if (!updatedTask) {
-                currentToolResult = { success: false, error: `Task with identifier "${identifier}" not found.` };
-              } else {
-                currentToolResult = { success: true, message: `Task "${updatedTask.title}" updated successfully.` };
-              }
-            }
-          } else if (functionName === 'delete_task') {
-            const { identifier } = functionArgs;
-            const query = mongoose.Types.ObjectId.isValid(identifier)
-              ? { _id: identifier, user: userId }
-              : { title: identifier, user: userId };
-
-            const deletedTask = await Task.findOneAndDelete(query);
-            if (!deletedTask) {
-              currentToolResult = { success: false, error: `Task with identifier "${identifier}" not found.` };
-            } else {
-              currentToolResult = { success: true, message: `Task "${deletedTask.title}" deleted successfully.` };
-            }
-          } else if (functionName === 'get_session_summary') {
-            // The session is already loaded in the `chat` variable
-            const summary = {
-              sessionId: chat.sessionId,
-              title: chat.title || `Chat from ${new Date(chat.createdAt).toLocaleDateString()}`,
-              createdAt: chat.createdAt,
-              lastActivity: chat.lastActivity,
-              messageCount: chat.messages.length,
-              // Maybe add first few/last few messages? Be careful with length.
-              // lastMessage: chat.messages.length > 0 ? chat.messages[chat.messages.length - 1]?.message?.substring(0,100) : 'No messages yet.'
-            };
-            currentToolResult = { success: true, summary: summary };
-          } else if (functionName === 'give_feedback') {
-            const { messageIndex, rating } = functionArgs;
-            const targetIndex = chat.messages.length - 1 - messageIndex; // Assume index is from recent history (0 = last AI msg)
-
-            if (targetIndex < 0 || targetIndex >= chat.messages.length) {
-              currentToolResult = { success: false, error: `Invalid message index ${messageIndex}. Max index is ${chat.messages.length - 1}.` };
-            } else {
-              const targetMessage = chat.messages[targetIndex];
-              if (targetMessage.sender !== 'ai') {
-                currentToolResult = { success: false, error: "Feedback can only be given for AI messages." };
-              } else if (isNaN(parseInt(rating)) || rating < 1 || rating > 5) {
-                currentToolResult = { success: false, error: "Rating must be an integer between 1 and 5." };
-              } else {
-                // Update directly in the loaded chat document for this request
-                targetMessage.feedback = rating;
-                // Mark the document as modified if directly manipulating subdocuments
-                chat.markModified('messages');
-                // The save will happen at the end of the request
-                currentToolResult = { success: true, message: `Feedback (${rating}) recorded for message.` };
-              }
-            }
-          }
-          // --- End NEW/RESTORED Tool Implementations ---
-          else {
-            logger.warn(`[${requestId}] [Chat ${sessionId}] Unknown tool called: ${functionName}`);
-            currentToolResult = { success: false, error: `Tool '${functionName}' is not available.` };
-          }
-          logger.info(`[${requestId}] [Chat ${sessionId}] Tool ${functionName} executed`, { toolCallId, success: currentToolResult.success });
+          // --- End Tool Implementations ---
+          logger.info(`[${requestId}] [Chat ${sessionId}] Tool ${functionName} executed`, { toolCallId, success: currentToolResult?.success });
 
         } catch (toolError) {
           logger.error(`[${requestId}] [Chat ${sessionId}] Error executing tool ${functionName}`, { toolCallId, args: functionArgs, error: toolError.message, stack: toolError.stack });
-          currentToolResult = { success: false, error: `An error occurred while trying to execute the tool: ${toolError.message}` };
+          currentToolResult = { success: false, error: `Server error executing tool '${functionName}': ${toolError.message}` };
         }
 
-        executedToolResults.push({ tool_call_id: toolCallId, name: functionName, result: currentToolResult });
-        chat.messages.push({ sender: 'tool', message: JSON.stringify(currentToolResult), type: 'tool_result', tool_call_id: toolCallId, tool_name: functionName, timestamp: new Date() });
-        toolResultsForClient.push(currentToolResult); // Add simplified result for client response
-      } // End of tool call execution loop
+        // --- Store Tool Result Message ---
+        const toolResultMessage = {
+            sender: 'tool',
+            message: currentToolResult?.message || (currentToolResult?.success ? `Executed ${functionName}` : `Failed to execute ${functionName}`), // User-friendly summary
+            type: 'tool_result',
+            tool_call_id: toolCallId,
+            tool_name: functionName,
+            toolResultData: currentToolResult, // Store the actual result object
+            timestamp: new Date()
+        };
+        chat.messages.push(toolResultMessage);
+        toolResultsForClient.push(currentToolResult); // Also send raw result to client if needed
 
-      // --- 5b. Send Tool Results Back to AI ---
+        // Prepare result object for sending back to AI
+        executedToolResults.push({
+            tool_call_id: toolCallId,
+            name: functionName,
+            result: currentToolResult // Send the full result object back
+        });
+
+      } // --- End of tool call execution loop ---
+
+      // --- 5c. Send Tool Results Back to AI ---
+      // Add the tool result messages to the history for the AI's context
       executedToolResults.forEach(tr => {
-        followUpHistory.push({ role: 'tool', tool_call_id: tr.tool_call_id, name: tr.name, content: JSON.stringify(tr.result) });
+        followUpHistory.push({
+             role: 'tool',
+             tool_call_id: tr.tool_call_id,
+             name: tr.name,
+             // Content MUST be a string for the OpenAI API
+             content: JSON.stringify(tr.result)
+            });
       });
 
-      const followUpPayload = { model: process.env.AI_MODEL || 'openai', messages: followUpHistory, referrer: process.env.POLLINATIONS_REFERRER || "DostifyApp-Backend" };
-      logger.info(`[${requestId}] [Chat ${sessionId}] Sending tool results back to Pollinations API`, { url: process.env.AI_API_URL });
+      const followUpPayload = {
+          model: aiModel, // Use same model
+          messages: followUpHistory,
+          // Do NOT include 'tools' or 'tool_choice' here unless you expect chained calls
+          referrer: process.env.POLLINATIONS_REFERRER || "DostifyApp-Backend"
+        };
+      logger.info(`[${requestId}] [Chat ${sessionId}] Sending tool results back to AI API`, { url: aiApiUrl });
+
       let followUpApiResponse;
       try {
-        followUpApiResponse = await axios.post(process.env.AI_API_URL, followUpPayload, { timeout: 120000 });
-        logger.info(`[${requestId}] [Chat ${sessionId}] Pollinations API (Follow-up) response status: ${followUpApiResponse.status}`);
+        followUpApiResponse = await axios.post(aiApiUrl, followUpPayload, { timeout: 120000 });
+        logger.info(`[${requestId}] [Chat ${sessionId}] AI API (Follow-up) response status: ${followUpApiResponse.status}`);
       } catch (apiError) {
-        logger.error(`[${requestId}] [Chat ${sessionId}] Pollinations API Error (Follow-up Call)`, { /* ... error details ... */ });
-        await chat.save(); // Save chat state up to tool results
-        return res.status(502).json({ message: 'Executed requested actions, but failed to get final summary from AI.', toolResults: toolResultsForClient, sessionId: chat.sessionId, timestamp: new Date().toISOString() });
+        const errorDetails = apiError.response ? { status: apiError.response.status, data: apiError.response.data } : { message: apiError.message };
+        logger.error(`[${requestId}] [Chat ${sessionId}] AI API Error (Follow-up Call)`, { error: errorDetails });
+        // Save chat state up to tool results even if follow-up fails
+        try { await chat.save(); } catch (saveErr) { logger.error(`[${requestId}] [Chat ${sessionId}] Failed to save tool results after AI follow-up error`, { saveError: saveErr.message }); }
+        return res.status(502).json({
+            message: 'Executed requested actions, but the AI failed to provide a final response.',
+            toolResults: toolResultsForClient, // Let client know what happened
+            sessionId: chat.sessionId,
+            timestamp: new Date().toISOString()
+        });
       }
 
-      if (!followUpApiResponse.data?.choices?.[0]) {
-        logger.error(`[${requestId}] [Chat ${sessionId}] Invalid structure from Pollinations follow-up`, { responseData: followUpApiResponse.data });
-        await chat.save();
-        return res.status(502).json({ message: 'Error: Received invalid final response from AI service after executing actions.', toolResults: toolResultsForClient, sessionId: chat.sessionId, timestamp: new Date().toISOString() });
+      // Process the final response from AI after getting tool results
+      // Ensure the final response has content
+      if (!followUpApiResponse.data?.choices?.[0]?.message?.content) {
+        logger.warn(`[${requestId}] [Chat ${sessionId}] AI follow-up response missing content`, { responseData: followUpApiResponse.data });
+        // Decide if this is an error or if AI just had nothing more to say
+        finalAiMessageContent = null; // Indicate no further text response
+        // If you expect text, treat it as an error:
+        // try { await chat.save(); } catch (saveErr) { /* log */ }
+        // return res.status(502).json({
+        //     message: 'Error: Received an unexpected final response format from the AI service after actions.',
+        //     toolResults: toolResultsForClient,
+        //     sessionId: chat.sessionId,
+        //     timestamp: new Date().toISOString()
+        // });
+      } else {
+          finalAiMessageContent = followUpApiResponse.data.choices[0].message.content; // Get the final text response
+          logger.info(`[${requestId}] [Chat ${sessionId}] Received final AI response after tool execution.`);
       }
-      finalAiMessageContent = followUpApiResponse.data.choices[0].message.content;
-      logger.info(`[${requestId}] [Chat ${sessionId}] Received final AI response after tool execution.`);
+
 
     } else {
-      // --- 6. No Tool Call ---
-      logger.info(`[${requestId}] [Chat ${sessionId}] AI responded directly.`);
-      finalAiMessageContent = responseMessage.content;
+      // --- 6. No Tool Call (Direct Response) ---
+      logger.info(`[${requestId}] [Chat ${sessionId}] AI responded directly without tool calls.`);
+      finalAiMessageContent = responseMessage.content; // Already have the content from initial response
+      // Ensure we handle the case where the direct response might be empty/null
+      if (finalAiMessageContent === null || finalAiMessageContent === undefined) {
+          logger.warn(`[${requestId}] [Chat ${sessionId}] AI direct response content is null or undefined.`);
+          finalAiMessageContent = null; // Explicitly set to null if empty
+      }
     }
 
-    // --- 7. Save Final AI Response and Send to Client ---
-    if (finalAiMessageContent !== null && finalAiMessageContent !== undefined && finalAiMessageContent.trim() !== "") {
-      const aiMessageToSave = { sender: 'ai', message: finalAiMessageContent, type: 'text', timestamp: new Date() };
+    // --- 7. Save Final AI Response (if content exists) ---
+    if (finalAiMessageContent && finalAiMessageContent.trim()) {
+      const aiMessageToSave = {
+          sender: 'ai',
+          message: finalAiMessageContent,
+          type: 'text', // Assuming final response is text
+          timestamp: new Date()
+          // tool_calls: undefined, // Ensure tool_calls isn't accidentally carried over if logic changes
+      };
       chat.messages.push(aiMessageToSave);
     } else {
-      logger.warn(`[${requestId}] [Chat ${sessionId}] Final AI message content was empty or null. Saving placeholder.`);
-      const aiMessageToSave = { sender: 'ai', message: "[AI response was empty]", type: 'text', timestamp: new Date() };
-      chat.messages.push(aiMessageToSave);
-      finalAiMessageContent = finalAiMessageContent || ""; // Ensure string for client
+      // Log if the final content was indeed empty after all processing
+      logger.info(`[${requestId}] [Chat ${sessionId}] Final AI message content was empty or null. Not saving empty AI message.`);
+      // Optionally, save a placeholder if you always want an AI entry after user input:
+      // chat.messages.push({ sender: 'ai', message: "[AI provided no further text response]", type: 'text', timestamp: new Date() });
     }
 
+    // --- 8. Final Save and Response to Client ---
     chat.lastActivity = new Date();
-    await chat.save();
-    logger.info(`[${requestId}] [Chat ${sessionId}] Final AI response saved. Chat completed.`);
+    await chat.save(); // Persist all changes (user msg, AI requests, tool results, final AI msg)
+    logger.info(`[${requestId}] [Chat ${sessionId}] Chat interaction completed and saved.`);
 
-    // Respond to the client with only new messages for this interaction
-    const lastUserMessageIndex = chat.messages.length - chat.messages.slice().reverse().findIndex(m => m.sender === 'user'); // Find the index of the user message saved at the start
-    const newMessagesForClient = chat.messages.slice(lastUserMessageIndex - 1); // Get user message + subsequent tool/AI messages
+    // Decide what to send back: just the new messages, or the whole (updated) chat object?
+    // Sending recent messages is often better for performance.
+    const messagesToSend = chat.messages.slice(-15); // Send last 15 messages as example
 
     res.json({
-      // newMessages: newMessagesForClient, // Send only new messages
-      messages: chat.messages.slice(-5), // Or send last N messages
-      ai: finalAiMessageContent,
-      toolResults: toolResultsForClient.length > 0 ? toolResultsForClient : undefined,
+      messages: messagesToSend, // Send a slice of recent messages
+      // Consider adding the full updated chat._id if client needs it
+      // chatId: chat._id,
+      toolResults: toolResultsForClient.length > 0 ? toolResultsForClient : undefined, // Include tool results if any
       sessionId: chat.sessionId,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString() // Timestamp of the overall response generation
     });
 
   } catch (err) {
+     // Catch potential errors during the find/save operations or unexpected issues
     logger.error(`[${requestId}] [Chat ${sessionId || 'N/A'}] POST /api/chat Unhandled Error`, { error: err.message, stack: err.stack, userId: userId });
-    res.status(500).json({ message: 'An unexpected server error occurred while processing your message.', error: process.env.NODE_ENV !== 'production' ? err.message : undefined });
+    // Avoid sending stack trace in production
+    const errorMessage = process.env.NODE_ENV === 'production'
+        ? 'An unexpected server error occurred while processing your message.'
+        : `Server Error: ${err.message}`;
+    res.status(500).json({ message: errorMessage, error: process.env.NODE_ENV !== 'production' ? err.message : undefined });
   }
 });
 
 
-// --- Other Chat Session Management Routes (Unchanged from previous version) ---
+// --- Other Chat Session Management Routes ---
 
-// List all chat sessions
+// GET /api/chat/sessions - List all chat sessions for the user
 router.get('/sessions', auth, async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
   logger.info(`[${requestId}] GET /api/chat/sessions request received`, { userId });
   try {
     const sessions = await Chat.find({ user: userId })
-      .select('sessionId title createdAt lastActivity messages')
-      .sort({ lastActivity: -1 })
-      .lean();
+      .select('sessionId title createdAt lastActivity messages') // Select messages to get count easily
+      .sort({ lastActivity: -1 }) // Sort by most recent activity
+      .lean(); // Use lean for performance as we are just reading and transforming
+
     const sessionSummaries = sessions.map(s => ({
       sessionId: s.sessionId,
       title: s.title || `Chat from ${new Date(s.createdAt).toLocaleDateString()}`,
       createdAt: s.createdAt,
       lastActivity: s.lastActivity,
-      messageCount: s.messages?.length || 0
+      messageCount: s.messages?.length || 0, // Calculate message count
+      // Optionally add snippet of last message:
+      // lastMessageSnippet: s.messages?.[s.messages.length - 1]?.message?.substring(0, 50) + '...'
     }));
     logger.info(`[${requestId}] GET /api/chat/sessions success`, { userId, count: sessionSummaries.length });
     res.json(sessionSummaries);
@@ -524,141 +674,276 @@ router.get('/sessions', auth, async (req, res) => {
   }
 });
 
-// Search chat sessions
+// GET /api/chat/sessions/search - Search chat sessions by title
 router.get('/sessions/search', auth, async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
-  const { q } = req.query;
+  const { q } = req.query; // Search query parameter
   logger.info(`[${requestId}] GET /api/chat/sessions/search request received`, { userId, query: q });
-  if (!q) { /* ... error handling ... */ return res.status(400).json({ message: 'Missing search query parameter "q"' }); }
+
+  // Validate query parameter
+  if (!q || typeof q !== 'string' || q.trim().length === 0) {
+       return res.status(400).json({ message: 'Missing or invalid search query parameter "q"' });
+   }
+  const trimmedQuery = q.trim();
+
   try {
-    const sessions = await Chat.find({ user: userId, title: { $regex: q, $options: 'i' } })
+    // Use regex for case-insensitive search on title
+    // Index on 'user' and 'title' would improve performance if needed: ChatSchema.index({ user: 1, title: 'text' });
+    const sessions = await Chat.find({
+        user: userId,
+        title: { $regex: trimmedQuery, $options: 'i' } // Case-insensitive regex search
+       })
       .select('sessionId title createdAt lastActivity messages')
-      .sort({ lastActivity: -1 })
-      .limit(50).lean();
-    const sessionSummaries = sessions.map(s => ({ /* ... projection ... */
-      sessionId: s.sessionId, title: s.title || `Chat from ${new Date(s.createdAt).toLocaleDateString()}`,
-      createdAt: s.createdAt, lastActivity: s.lastActivity, messageCount: s.messages?.length || 0
+      .sort({ lastActivity: -1 }) // Sort results
+      .limit(50) // Limit the number of search results returned
+      .lean();
+
+    const sessionSummaries = sessions.map(s => ({
+      sessionId: s.sessionId,
+      title: s.title || `Chat from ${new Date(s.createdAt).toLocaleDateString()}`,
+      createdAt: s.createdAt,
+      lastActivity: s.lastActivity,
+      messageCount: s.messages?.length || 0
     }));
-    logger.info(`[${requestId}] GET /api/chat/sessions/search success`, { userId, query: q, count: sessionSummaries.length });
+    logger.info(`[${requestId}] GET /api/chat/sessions/search success`, { userId, query: trimmedQuery, count: sessionSummaries.length });
     res.json(sessionSummaries);
   } catch (err) {
-    logger.error(`[${requestId}] GET /api/chat/sessions/search error`, { userId, query: q, error: err.message, stack: err.stack });
+    logger.error(`[${requestId}] GET /api/chat/sessions/search error`, { userId, query: trimmedQuery, error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Could not search chat sessions', error: err.message });
   }
 });
 
-// Rename a chat session
+// PATCH /api/chat/sessions/:sessionId/title - Rename a chat session
 router.patch('/sessions/:sessionId/title', auth, validate(renameSchema), async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
   const { sessionId } = req.params;
-  const { title } = req.body;
+  const { title } = req.body; // New title from request body
   logger.info(`[${requestId}] PATCH /api/chat/sessions/:sessionId/title request received`, { userId, sessionId, newTitle: title });
+
   try {
-    const chat = await Chat.findOneAndUpdate({ user: userId, sessionId: sessionId }, { $set: { title: title } }, { new: true }).select('sessionId title');
-    if (!chat) { /* ... not found handling ... */ return res.status(404).json({ message: 'Chat session not found or you do not have permission to modify it.' }); }
+    // Find the specific chat belonging to the user and update its title
+    const chat = await Chat.findOneAndUpdate(
+        { user: userId, sessionId: sessionId }, // Query criteria
+        { $set: { title: title } }, // Update operation
+        { new: true } // Options: return the updated document
+      ).select('sessionId title'); // Only select necessary fields for the response
+
+    if (!chat) {
+         // If no chat found matching user and sessionId
+         return res.status(404).json({ message: 'Chat session not found or you do not have permission to modify it.' });
+     }
     logger.info(`[${requestId}] PATCH /api/chat/sessions/:sessionId/title success`, { userId, sessionId });
-    res.json({ sessionId: chat.sessionId, title: chat.title });
+    res.json({ sessionId: chat.sessionId, title: chat.title }); // Return updated info
   } catch (err) {
     logger.error(`[${requestId}] PATCH /api/chat/sessions/:sessionId/title error`, { userId, sessionId, newTitle: title, error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Could not rename session', error: err.message });
   }
 });
 
-// Delete a chat session
+// DELETE /api/chat/sessions/:sessionId - Delete a chat session
 router.delete('/sessions/:sessionId', auth, async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
   const { sessionId } = req.params;
   logger.info(`[${requestId}] DELETE /api/chat/sessions/:sessionId request received`, { userId, sessionId });
+
   try {
+    // Find and delete the chat document matching user and sessionId
     const result = await Chat.findOneAndDelete({ user: userId, sessionId: sessionId });
-    if (!result) { /* ... not found handling ... */ return res.status(404).json({ message: 'Chat session not found or you do not have permission to delete it.' }); }
+
+    if (!result) {
+         // If no chat session was found and deleted
+         return res.status(404).json({ message: 'Chat session not found or you do not have permission to delete it.' });
+     }
     logger.info(`[${requestId}] DELETE /api/chat/sessions/:sessionId success`, { userId, sessionId });
-    res.json({ message: 'Session deleted successfully', sessionId: sessionId });
+    res.json({ message: 'Session deleted successfully', sessionId: sessionId }); // Confirmation message
   } catch (err) {
     logger.error(`[${requestId}] DELETE /api/chat/sessions/:sessionId error`, { userId, sessionId, error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Could not delete session', error: err.message });
   }
 });
 
-// Export a chat session
+// GET /api/chat/sessions/:sessionId/export - Export a chat session as JSON
 router.get('/sessions/:sessionId/export', auth, async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
   const { sessionId } = req.params;
   logger.info(`[${requestId}] GET /api/chat/sessions/:sessionId/export request received`, { userId, sessionId });
+
   try {
-    const chat = await Chat.findOne({ user: userId, sessionId: sessionId }).select('sessionId title messages createdAt lastActivity -_id -user').lean();
-    if (!chat) { /* ... not found handling ... */ return res.status(404).json({ message: 'Session not found or access denied.' }); }
-    const filename = `dostify_chat_${sessionId}_${new Date().toISOString().split('T')[0]}.json`;
+    // Find the chat, exclude user ID and mongo default fields (_id, __v) from export
+    const chat = await Chat.findOne({ user: userId, sessionId: sessionId })
+        .select('sessionId title messages createdAt lastActivity -_id -user -__v') // Exclude fields using minus sign
+        .lean(); // Use lean for plain JavaScript object
+
+    if (!chat) {
+         return res.status(404).json({ message: 'Session not found or access denied.' });
+     }
+
+    // Sanitize filename to prevent issues
+    const safeSessionId = sessionId.replace(/[^a-z0-9_\-]/gi, '_').toLowerCase();
+    const filename = `dostify_chat_${safeSessionId}_${new Date().toISOString().split('T')[0]}.json`;
+
+    // Set headers for file download
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'application/json');
     logger.info(`[${requestId}] GET /api/chat/sessions/:sessionId/export success`, { userId, sessionId });
-    res.json(chat);
+    res.json(chat); // Send the selected chat data as JSON response body
   } catch (err) {
     logger.error(`[${requestId}] GET /api/chat/sessions/:sessionId/export error`, { userId, sessionId, error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Could not export session', error: err.message });
   }
 });
 
-// Paginated message retrieval
+// GET /api/chat/sessions/:sessionId/messages - Get messages for a session (paginated)
 router.get('/sessions/:sessionId/messages', auth, async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
   const { sessionId } = req.params;
-  const { page = 1, limit = 20 } = req.query;
+  const { page = 1, limit = 20 } = req.query; // Default page 1, limit 20
   logger.info(`[${requestId}] GET /api/chat/sessions/:sessionId/messages request received`, { userId, sessionId, page, limit });
+
   try {
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    if (isNaN(pageNum) || pageNum < 1 || isNaN(limitNum) || limitNum < 1 || limitNum > 100) { /* ... validation ... */ return res.status(400).json({ message: 'Invalid page or limit parameter. Limit must be between 1 and 100.' }); }
+    const pageNum = parseInt(page, 10);
+    const limitNum = parseInt(limit, 10);
+
+    // Validate pagination parameters
+    if (isNaN(pageNum) || pageNum < 1 || isNaN(limitNum) || limitNum < 1 || limitNum > 100) { // Set a max limit (e.g., 100)
+        return res.status(400).json({ message: 'Invalid page or limit parameter. Page must be >= 1, limit must be between 1 and 100.' });
+     }
+
     const skip = (pageNum - 1) * limitNum;
 
+    // Method 1: Using find and slice (simpler, potentially less efficient for very large arrays)
+     const chat = await Chat.findOne({ user: userId, sessionId: sessionId })
+         .select('messages sessionId') // Select only messages and sessionId
+         // Project only the needed fields from the messages array
+         .populate({ // Or use projection within find if populate isn't needed
+             path: 'messages',
+             select: 'sender message type imageUrl feedback timestamp tool_calls tool_call_id tool_name toolResultData _id', // Include _id if needed by frontend
+             options: {
+                 sort: { timestamp: -1 }, // Sort messages newest first *before* slicing/skipping if needed
+                 skip: skip,
+                 limit: limitNum
+             }
+         });
+
+
+     // Method 2: Using Aggregation (more complex, potentially more efficient)
+    /*
     const aggregation = await Chat.aggregate([
       { $match: { user: new mongoose.Types.ObjectId(userId), sessionId: sessionId } },
-      { $project: { _id: 0, sessionId: 1, totalMessages: { $size: "$messages" }, messages: { $slice: ["$messages", skip, limitNum] } } },
-      { $project: { sessionId: 1, totalMessages: 1, 'messages.sender': 1, 'messages.message': 1, 'messages.type': 1, 'messages.imageUrl': 1, 'messages.feedback': 1, 'messages.timestamp': 1, 'messages.tool_calls': 1, 'messages.tool_call_id': 1, 'messages.tool_name': 1 } }
+      { $project: {
+          sessionId: 1,
+          totalMessages: { $size: "$messages" },
+          // Slice the messages array for pagination
+          messages: { $slice: ["$messages", skip, limitNum] }
+          // Unwind and re-project if you need to sort messages before slicing, which is more complex
+      }},
+      // Optional: Project specific fields from the sliced messages if needed
+      // { $project: { sessionId: 1, totalMessages: 1, 'messages.sender': 1, ... } }
     ]);
 
-    if (aggregation.length === 0) { /* ... not found handling ... */ return res.status(404).json({ message: 'Chat session not found or access denied.' }); }
-    const result = aggregation[0];
-    logger.info(`[${requestId}] GET /api/chat/sessions/:sessionId/messages success`, { userId, sessionId, count: result.messages.length, total: result.totalMessages });
-    res.json({ sessionId: result.sessionId, messages: result.messages || [], total: result.totalMessages, page: pageNum, limit: limitNum });
+    if (aggregation.length === 0) {
+        return res.status(404).json({ message: 'Chat session not found or access denied.' });
+    }
+    const chatData = aggregation[0];
+    const total = chatData.totalMessages;
+    const messages = chatData.messages || [];
+    */
+
+    if (!chat) {
+        return res.status(404).json({ message: 'Chat session not found or access denied.' });
+    }
+
+    // Need total count separately if using Method 1
+    const total = await Chat.countDocuments({ user: userId, sessionId: sessionId }); // This counts sessions, not messages
+    const totalMessagesResult = await Chat.aggregate([ // Need to count messages in the specific chat
+        { $match: { user: new mongoose.Types.ObjectId(userId), sessionId: sessionId } },
+        { $project: { messageCount: { $size: "$messages" } } }
+    ]);
+    const totalMsgCount = totalMessagesResult.length > 0 ? totalMessagesResult[0].messageCount : 0;
+
+    logger.info(`[${requestId}] GET /api/chat/sessions/:sessionId/messages success`, { userId, sessionId, count: chat.messages.length, total: totalMsgCount });
+    res.json({
+        sessionId: chat.sessionId,
+        messages: chat.messages || [],
+        total: totalMsgCount, // Use the accurate message count
+        page: pageNum,
+        limit: limitNum
+     });
   } catch (err) {
     logger.error(`[${requestId}] GET /api/chat/sessions/:sessionId/messages error`, { userId, sessionId, query: req.query, error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Could not fetch messages', error: err.message });
   }
 });
 
-// Submit feedback for an AI message
+
+// POST /api/chat/:sessionId/feedback - Submit feedback for a specific AI message
 router.post('/:sessionId/feedback', auth, validate(feedbackSchema), async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
   const { sessionId } = req.params;
+  // Assume frontend might send index OR messageId, prioritize messageId if available
   const { messageIndex, feedback } = req.body;
+  // const messageId = req.body.messageId; // If frontend sends messageId
+
   logger.info(`[${requestId}] POST /api/chat/:sessionId/feedback request received`, { userId, sessionId, messageIndex, feedback });
+
   try {
-    const chat = await Chat.findOne({ user: userId, sessionId: sessionId }).select('messages');
-    if (!chat) { /* ... not found handling ... */ return res.status(404).json({ message: 'Chat session not found or access denied.' }); }
-    if (messageIndex < 0 || messageIndex >= chat.messages.length) { /* ... index validation ... */ return res.status(400).json({ message: 'Invalid message index provided.' }); }
+    // Find the chat session
+    const chat = await Chat.findOne({ user: userId, sessionId: sessionId }).select('messages'); // Need messages to find _id by index
+    if (!chat) {
+        return res.status(404).json({ message: 'Chat session not found or access denied.' });
+    }
 
+    // --- Find message _id using index (if messageId not sent directly) ---
+    if (messageIndex === undefined || messageIndex === null || messageIndex < 0 || messageIndex >= chat.messages.length) {
+        return res.status(400).json({ message: 'Invalid or missing message index provided.' });
+    }
     const targetMessage = chat.messages[messageIndex];
-    if (!targetMessage) { /* ... target message validation ... */ return res.status(400).json({ message: 'Could not find message at the specified index.' }); }
-    if (targetMessage.sender !== 'ai') { /* ... sender validation ... */ return res.status(400).json({ message: 'Feedback can only be provided for AI messages.' }); }
+    if (!targetMessage) {
+        // Should not happen if index is valid, but check anyway
+        return res.status(400).json({ message: `Message at index ${messageIndex} not found.`});
+    }
+    if (targetMessage.sender !== 'ai') {
+        // Ensure feedback is only for AI messages
+        return res.status(400).json({ message: 'Feedback can only be provided for AI messages.' });
+    }
+    const messageIdToUpdate = targetMessage._id; // Get the actual _id of the subdocument
+    if (!messageIdToUpdate) {
+         logger.error(`[${requestId}] Message at index ${messageIndex} lacks _id in session ${sessionId}`);
+         return res.status(500).json({ message: 'Internal error: Cannot identify message for feedback.' });
+    }
+    // --- End Find message _id ---
 
-    const messageIdToUpdate = targetMessage._id;
-    if (!messageIdToUpdate) { /* ... ID validation ... */ return res.status(500).json({ message: 'Internal error identifying message for update.' }); }
-
+    // Use the message's _id to update feedback atomically
     const updateResult = await Chat.updateOne(
-      { user: userId, sessionId: sessionId, "messages._id": messageIdToUpdate },
-      { $set: { "messages.$.feedback": feedback } }
+      {
+          // Match the chat document AND the specific message within the array
+          _id: chat._id, // More specific match using chat's _id
+          "messages._id": messageIdToUpdate // Target the specific message subdocument by its _id
+      },
+      {
+          // Update the feedback field of the matched array element
+          $set: { "messages.$.feedback": feedback } // Use the positional $ operator
+      }
     );
 
-    if (updateResult.matchedCount === 0) { /* ... match validation ... */ return res.status(404).json({ message: 'Could not find the specific message to update feedback.' }); }
-    if (updateResult.modifiedCount === 0) { /* ... no change logging ... */ logger.info(`[${requestId}] POST /api/chat/:sessionId/feedback feedback unchanged`, { userId, sessionId, messageIndex, feedback }); }
-    else { logger.info(`[${requestId}] POST /api/chat/:sessionId/feedback success`, { userId, sessionId, messageIndex, feedback }); }
+    if (updateResult.matchedCount === 0) {
+         // This indicates the chat or the specific message wasn't found during the update operation
+         logger.warn(`[${requestId}] Feedback update failed to match document/message`, { userId, sessionId, messageId: messageIdToUpdate });
+         return res.status(404).json({ message: 'Could not find the specific message to update feedback. It might have been deleted.' });
+     }
+    if (updateResult.modifiedCount === 0) {
+        // This means the message was found, but the feedback value was already set to the provided value
+         logger.info(`[${requestId}] POST /api/chat/:sessionId/feedback feedback unchanged (already ${feedback})`, { userId, sessionId, messageId: messageIdToUpdate });
+     } else {
+        // Successfully updated
+        logger.info(`[${requestId}] POST /api/chat/:sessionId/feedback success`, { userId, sessionId, messageId: messageIdToUpdate, feedback });
+     }
 
     res.json({ message: 'Feedback saved successfully' });
   } catch (err) {
@@ -668,20 +953,35 @@ router.post('/:sessionId/feedback', auth, validate(feedbackSchema), async (req, 
 });
 
 
-// Save task directly to planner (e.g., user clicks button based on AI suggestion)
+// POST /api/chat/:sessionId/save-task - Manually save a task derived from chat context
 router.post('/:sessionId/save-task', auth, validate(saveTaskSchema), async (req, res) => {
   const userId = req.userId;
   const requestId = req.id;
-  const { sessionId } = req.params;
-  const { title, description, dueDate } = req.body;
+  const { sessionId } = req.params; // SessionId is mainly for context logging here
+  const { title, description, dueDate } = req.body; // Task details from request body
   logger.info(`[${requestId}] POST /api/chat/:sessionId/save-task request received`, { userId, sessionId, title, description, dueDate });
+
   try {
-    const task = new Task({ user: userId, title, description, dueDate: dueDate ? new Date(dueDate) : undefined });
+    // Create a new Task document associated with the authenticated user
+    const task = new Task({
+        user: userId,
+        title: title,
+        description: description,
+        // Ensure dueDate is stored as a Date object if provided, otherwise undefined
+        dueDate: dueDate ? new Date(dueDate) : undefined
+    });
+    // Save the new task to the database
     await task.save();
     logger.info(`[${requestId}] POST /api/chat/:sessionId/save-task success`, { userId, sessionId, taskId: task._id });
-    res.status(201).json(task);
+    // Respond with the newly created task object
+    res.status(201).json(task); // HTTP 201 Created status
   } catch (err) {
     logger.error(`[${requestId}] POST /api/chat/:sessionId/save-task error`, { userId, sessionId, body: req.body, error: err.message, stack: err.stack });
+    // Handle potential validation errors from the Task model schema
+    if (err.name === 'ValidationError') {
+        return res.status(400).json({ message: 'Task validation failed', error: err.message });
+    }
+    // Generic server error for other issues
     res.status(500).json({ message: 'Server error saving task', error: err.message });
   }
 });
