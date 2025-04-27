@@ -1,7 +1,27 @@
 require('dotenv').config();
 const express = require('express');
+const { BACKEND_URL } = require('./config/constants');
 const cors = require('cors');
 const mongoose = require('mongoose');
+
+// --- Keep-alive ping to prevent Render dyno from idling ---
+const axios = require('axios');
+
+// Ping every 5 minutes (300,000 ms)
+setInterval(() => {
+  axios.get(`${BACKEND_URL}/health`)
+    .then(res => {
+      if (res.status !== 200) throw new Error(`Non-200 response: ${res.status}`);
+    })
+    .catch(err => {
+      // Log error but do not crash
+      if (typeof console !== 'undefined') {
+        console.error(`[KeepAlive] Ping to ${BACKEND_URL} failed:`, err.message);
+      }
+    });
+}, 5 * 60 * 1000); // 5 minutes
+// --- End keep-alive ping ---
+
 
 const app = express();
 app.set('trust proxy', 1); // Trust first proxy for correct IP handling behind proxies
