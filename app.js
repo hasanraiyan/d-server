@@ -78,8 +78,7 @@ app.post('/api/validate-example', (req, res) => {
 
 // MongoDB connection
 mongoose.connect(process.env.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
+  // No longer need useNewUrlParser or useUnifiedTopology
 })
 .then(() => logger.info('MongoDB connected'))
 .catch((err) => logger.error('MongoDB connection error', { error: err }));
