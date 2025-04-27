@@ -141,10 +141,23 @@ router.post('/', auth, validate(chatSchema), async (req, res) => {
     }
     // Prepare context for AI (last 10 messages)
     const contextMsgs = chat.messages.slice(-10).map(m => {
+      // Always use content as an array of objects
       if (m.type === 'image' && m.imageUrl) {
-        return { role: m.sender === 'user' ? 'user' : 'assistant', content: [{ type: 'text', text: m.message }, { type: 'image_url', image_url: { url: m.imageUrl } }] };
+        return {
+          role: m.sender === 'user' ? 'user' : 'assistant',
+          content: [
+            { type: 'text', text: m.message },
+            { type: 'image_url', image_url: { url: m.imageUrl } }
+          ]
+        };
       } else {
-        return { role: m.sender === 'user' ? 'user' : 'assistant', content: m.message };
+        // For plain text, wrap in array of one object
+        return {
+          role: m.sender === 'user' ? 'user' : 'assistant',
+          content: [
+            { type: 'text', text: m.message }
+          ]
+        };
       }
     });
     // Add current user message
